@@ -1,0 +1,166 @@
+<!doctype html><meta charset="utf-8">
+<html lang="en">
+<head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CareStock Agent</title>
+<style>
+  :root { --ink:#1b2430; --muted:#5b6675; --line:#e3e8ef; --bg:#f6f8fb; --pp:#003087; --ppy:#ffc439; --red:#c0392b; --amber:#b9770e; --green:#1e8449; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color:var(--ink); background:var(--bg); }
+  header { background:#fff; border-bottom:1px solid var(--line); padding:14px 20px; display:flex; flex-wrap:wrap; gap:10px; align-items:center; justify-content:space-between; }
+  h1 { font-size:20px; margin:0; }
+  h1 small { font-weight:400; color:var(--muted); font-size:13px; display:block; }
+  .badges span { font-size:12px; border:1px solid var(--line); border-radius:999px; padding:3px 10px; margin-left:6px; background:#fff; }
+  main { max-width:1080px; margin:0 auto; padding:18px; display:grid; gap:18px; grid-template-columns: 1fr; }
+  @media (min-width: 960px) { main { grid-template-columns: 1.1fr 1fr; } .full { grid-column: 1 / -1; } }
+  section { background:#fff; border:1px solid var(--line); border-radius:12px; padding:16px; }
+  h2 { font-size:16px; margin:0 0 10px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:7px 6px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:600; }
+  .bar { height:6px; background:var(--line); border-radius:3px; overflow:hidden; margin-top:4px; }
+  .bar i { display:block; height:100%; }
+  .muted { color:var(--muted); }
+  .pill { font-size:11px; padding:2px 8px; border-radius:999px; color:#fff; }
+  .high { background:var(--red); } .medium { background:var(--amber); } .low { background:var(--green); }
+  .blocked, .deferred { background:#7f8c8d; }
+  button { font: inherit; cursor:pointer; border:0; border-radius:24px; padding:11px 18px; font-weight:600; }
+  .primary { background:var(--pp); color:#fff; }
+  .paypal { background:var(--ppy); color:#111; width:100%; font-size:16px; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .summary { background:#eef4ff; border-radius:8px; padding:10px 12px; margin:10px 0; font-size:14px; }
+  .totals { display:flex; justify-content:space-between; font-size:14px; margin:12px 0; }
+  .notes { font-size:12px; color:var(--amber); }
+  input[type=text] { font:inherit; padding:9px 10px; border:1px solid var(--line); border-radius:8px; width:100%; margin:6px 0 12px; }
+  .banner { padding:12px 16px; border-radius:10px; font-weight:600; }
+  .ok { background:#e8f8ee; color:var(--green); } .warn { background:#fdf2e3; color:var(--amber); }
+  ol.log { list-style:none; padding:0; margin:0; font-size:12px; max-height:340px; overflow:auto; }
+  ol.log li { border-bottom:1px solid var(--line); padding:6px 0; }
+  code { font-size:11px; color:var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>CareStock Agent <small id="facility">AI purchasing for care homes, paid with PayPal after a human says yes</small></h1>
+  <div class="badges"><span id="ppmode">PayPal: ...</span><span id="reviewer">Agent: ...</span></div>
+</header>
+<main>
+  <div id="banner" class="full" hidden></div>
+
+  <section>
+    <h2>Stock on hand</h2>
+    <table><thead><tr><th>Item</th><th>Stock</th><th>Used / day (7d)</th><th>Days left</th></tr></thead><tbody id="inv"></tbody></table>
+  </section>
+
+  <section>
+    <h2>Restock proposal</h2>
+    <p class="muted" id="rules"></p>
+    <button class="primary" id="propose">Ask the agent for a restock plan</button>
+    <div id="plan"></div>
+  </section>
+
+  <section class="full">
+    <h2>Audit trail <span id="chain" class="muted"></span></h2>
+    <ol class="log" id="log"></ol>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const money = (c) => '$' + (c / 100).toFixed(2);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[c]);
+let currentPlan = null;
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error || res.statusText);
+  return json;
+}
+
+async function loadStatus() {
+  const s = await api('/api/status');
+  $('facility').textContent = s.facility.name + ' - ' + s.facility.beds + ' beds - demo data';
+  $('ppmode').textContent = 'PayPal: ' + (s.paypalMode === 'mock' ? 'mock (no keys)' : s.paypalMode);
+  $('reviewer').textContent = 'Agent: ' + s.reviewer;
+  const p = s.policy;
+  $('rules').textContent = `Rules set by the manager: max ${money(p.maxOrderCents)} per approval, ${money(p.monthlyBudgetCents)} per month (${money(p.monthlyBudgetCents - s.spentThisMonthCents)} left), approved suppliers only. The agent drafts, a person approves, PayPal pays.`;
+  $('inv').innerHTML = s.inventory.map((i) => {
+    const daily = i.usage7d.reduce((a, b) => a + b, 0) / 7;
+    const days = daily ? i.stock / daily : 99;
+    const color = days <= i.leadTimeDays ? 'var(--red)' : days <= i.leadTimeDays + 3 ? 'var(--amber)' : 'var(--green)';
+    return `<tr><td>${esc(i.name)}<div class="muted">${esc(i.supplier)}</div></td>
+      <td>${i.stock} ${esc(i.unit)}${i.onOrder ? `<div class="muted">+${i.onOrder} on order</div>` : ''}</td>
+      <td>${daily.toFixed(1)}</td>
+      <td>${days.toFixed(1)}<div class="bar"><i style="width:${Math.min(100, days / 21 * 100)}%;background:${color}"></i></div></td></tr>`;
+  }).join('');
+  const chain = s.ledger;
+  $('chain').textContent = chain.ok ? `- hash chain verified (${chain.count} entries)` : `- CHAIN BROKEN at #${chain.brokenAt}`;
+}
+
+async function loadLog() {
+  const l = await api('/api/ledger');
+  $('log').innerHTML = l.entries.slice().reverse().map((e) => {
+    const d = e.data;
+    const amt = d.amountCents ?? d.totalCents;
+    return `<li><b>${esc(e.type.replace(/_/g, ' '))}</b> by ${esc(e.actor)} ${amt != null ? '- ' + money(amt) : ''}
+      ${d.orderId ? '- PayPal order ' + esc(d.orderId) : ''} ${d.captureId ? '- capture ' + esc(d.captureId) : ''}
+      <div class="muted">${esc(e.ts)} <code>#${e.seq} ${e.hash.slice(0, 12)}...</code></div></li>`;
+  }).join('') || '<li class="muted">No entries yet.</li>';
+}
+
+function renderPlan(plan) {
+  currentPlan = plan;
+  const okLines = plan.lines.filter((l) => l.status === 'ok');
+  $('plan').innerHTML = `
+    <div class="summary">${esc(plan.summary || 'No summary.')}<div class="muted">Reviewed by: ${esc(plan.reviewer)}</div></div>
+    <table><thead><tr><th></th><th>Item</th><th>Qty</th><th>Total</th></tr></thead><tbody>
+    ${plan.lines.map((l) => `<tr>
+      <td>${l.status === 'ok' ? `<input type="checkbox" class="pick" value="${esc(l.sku)}" checked aria-label="buy ${esc(l.name)}">` : ''}</td>
+      <td>${esc(l.name)} <span class="pill ${l.status === 'ok' ? l.urgency : l.status}">${l.status === 'ok' ? l.urgency : l.status}</span>
+        <div class="muted">${l.reasons.map(esc).join(' - ')}</div>
+        ${l.notes.length ? `<div class="notes">${l.notes.map(esc).join(' - ')}</div>` : ''}</td>
+      <td>${l.packs} pack${l.packs === 1 ? '' : 's'}<div class="muted">x ${l.packSize}</div></td>
+      <td>${l.status === 'ok' ? money(l.lineTotalCents) : '-'}</td></tr>`).join('')}
+    </tbody></table>
+    <div class="totals"><span>Total <b id="total">${money(plan.totalCents)}</b></span><span class="muted">limit for this approval ${money(plan.capCents)}</span></div>
+    ${okLines.length ? `<label>Approved by (name or role)<input type="text" id="approver" value="Nurse on duty" maxlength="60"></label>
+    <button class="paypal" id="approve">Approve &amp; pay with PayPal</button>` : '<p class="muted">Nothing to buy.</p>'}`;
+  document.querySelectorAll('.pick').forEach((c) => c.addEventListener('change', updateTotal));
+  if ($('approve')) $('approve').addEventListener('click', approve);
+}
+
+function updateTotal() {
+  const picked = new Set([...document.querySelectorAll('.pick:checked')].map((c) => c.value));
+  const t = currentPlan.lines.filter((l) => l.status === 'ok' && picked.has(l.sku)).reduce((s, l) => s + l.lineTotalCents, 0);
+  $('total').textContent = money(t);
+  $('approve').disabled = picked.size === 0;
+}
+
+async function approve() {
+  $('approve').disabled = true;
+  try {
+    const skus = [...document.querySelectorAll('.pick:checked')].map((c) => c.value);
+    const r = await api(`/api/plans/${currentPlan.id}/approve`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ approver: $('approver').value, skus }),
+    });
+    location.href = r.approveUrl; // PayPal checkout (or the mock page)
+  } catch (e) { showBanner('warn', e.message); $('approve').disabled = false; }
+}
+
+function showBanner(kind, text) { const b = $('banner'); b.className = 'full banner ' + kind; b.textContent = text; b.hidden = false; }
+
+$('propose').addEventListener('click', async () => {
+  $('propose').disabled = true;
+  try { renderPlan(await api('/api/plans', { method: 'POST' })); await loadLog(); }
+  catch (e) { showBanner('warn', e.message); }
+  finally { $('propose').disabled = false; }
+});
+
+const q = new URLSearchParams(location.search);
+if (q.get('paid')) showBanner('ok', `Paid with PayPal and recorded. Plan ${q.get('paid')} is on its way; stock "on order" is updated.`);
+if (q.has('cancelled')) showBanner('warn', 'Payment cancelled on PayPal. Nothing was charged; the cancellation is in the audit trail.');
+loadStatus(); loadLog();
+</script>
+</body>
+</html>

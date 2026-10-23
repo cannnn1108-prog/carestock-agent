@@ -1,0 +1,13 @@
+{
+  "name": "carestock-agent",
+  "version": "0.1.0",
+  "description": "An AI purchasing agent for care homes: forecasts consumable usage, drafts a reorder, and pays with PayPal only after a staff member approves it.",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node src/server.js",
+    "demo": "node scripts/demo.js",
+    "test": "node --test test/"
+  }
+}
